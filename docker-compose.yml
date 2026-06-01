@@ -4,6 +4,3 @@ services:
     build: ./appdaemon
     env_file: .env
     restart: unless-stopped
-    networks:
-      homeassistant_network:
-        ipv4_address: office-server.fernie.local
