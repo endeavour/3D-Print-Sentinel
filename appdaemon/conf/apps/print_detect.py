@@ -11,8 +11,7 @@ class PrintDetect(ad.ADBase):
     '''
     This class is used to detect issues with a 3D print job using the machine learning model. 
     It takes a snapshot of the print job every x seconds (5 by default) and runs the detection model on the image.
-    If an issue is detected, a notification is sent to the user with the option to stop the print job.
-    When an error is detected, the print job will be stopped in x minutes (2 by default) if not dismissed via the notification.
+    If an issue is detected, a notification with an annotated image is sent to the user with the option to stop the print job or dismiss.
     '''
     
     def initialize(self):
@@ -202,7 +201,7 @@ class PrintDetect(ad.ADBase):
         The user must explicitly choose Stop Print or Dismiss.
         """
         self.alert_active = True
-        self.adapi.call_service("notify/notify", message=f"An issue with your 3D print has been detected. The print will be stopped in {self.print_termination_time} seconds if not dismissed.", 
+        self.adapi.call_service("notify/notify", message=f"An issue with your 3D print has been detected.", 
                                 title="3D Print Issue Detected",
                                 data={
                                     "image": f"/media/local/{self.detected_snapshot_image}",
@@ -248,15 +247,15 @@ class PrintDetect(ad.ADBase):
         It will send a notification if an issue is detected.
         '''
         # check if the printer is on and a notification has not already been sent
-        if self.printer_status.is_state(self.printer_printing_state) and self.cancel_handle == None:
+        if self.printer_status.is_state(self.printer_printing_state) and not self.alert_active:
             # call the extra notifications router to check if any extra notifications are needed
             self.extra_notifications_router()
             # if the printer is on, take a snapshot and run the detection model
             detection_count = self.perform_detection()
             # if an issue is detected, send a notification
             if detection_count > 0:
-                self.adapi.log(f"Detection threshold met ({detection_count} issues), sending notification and starting countdown")
-                self.send_detection_notification_and_countdown()
+                self.adapi.log(f"Detection threshold met ({detection_count} issues), sending notification")
+                self.send_detection_notification()
 
     def handle_action(self, event_name, data, kwargs):
         '''
@@ -268,13 +267,7 @@ class PrintDetect(ad.ADBase):
             self.stop_print_job()
         elif data["action"] == "DISMISS_NOTIFICATION":
             self.dismiss_print_cancel()
-            
-    def cancel_print_callback(self, cb_args):
-        '''
-        A callback function for when the timer to stop the print job is called.
-        '''
-        self.stop_print_job()
-            
+
     def stop_print_job(self):
         '''
         This function is called to stop the print job. 
@@ -287,9 +280,7 @@ class PrintDetect(ad.ADBase):
     def dismiss_print_cancel(self):
         '''
         This function is called to dismiss the print issue notification.
-        It will cancel the timer to stop the print job and send a notification to the user that the issue has been dismissed.
+        It clears the alert flag and sends a confirmation notification.
         '''
-        if self.cancel_handle is not None:
-            self.adapi.cancel_timer(self.cancel_handle)
-            self.cancel_handle = None
+        self.alert_active = False
         self.adapi.call_service("notify/notify", message="The 3D print issue has been dismissed.", title="3D Print Issue Dismissed")
