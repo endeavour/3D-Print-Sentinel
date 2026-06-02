@@ -35,7 +35,6 @@ class PrintDetect(ad.ADBase):
         self.printer_status = self.adapi.get_entity(self.printer_status_entity) # get the printer status
         self.print_cameras = [self.adapi.get_entity(e) for e in self.printer_camera_entities] # get all cameras
         self.detected_snapshot_image = "snapshot_0.jpg" # track which camera image triggered detection
-        self.detected_annotated_image = None # annotated BGR image for notification
         self.stop_print_button = self.adapi.get_entity(self.printer_stop_button_entity) # get the stop print button
         self.extruder_temp_sensor = self.adapi.get_entity(self.extruder_temp_sensor_entity) # get the extruder temperature sensor
         self.extruder_target_temp_sensor = self.adapi.get_entity(self.extruder_target_temp_sensor_entity) # get the extruder target temperature sensor
@@ -45,8 +44,7 @@ class PrintDetect(ad.ADBase):
             raise RuntimeError("Invalid Config File. ExtruderTempSensor and ExtruderTargetTempSensor must be defined if NotifyOnWarmup is True.")
         
         self.adapi.run_every(self.run_every_c, "now", self.detection_interval) # run the detection every x seconds
-        self.adapi.listen_event(self.handle_action, "mobile_app_notification_action") # listen for mobile app notification actions (e.g. stop print or dismiss)
-        self.adapi.listen_event(self.handle_persistent_notification_dismissed, "persistent_notifications_updated") # listen for persistent notification dismissal
+        self.adapi.listen_event(self.handle_action, "mobile_app_notification_action") # listen for mobile app notification actions (e.g. stop print or continue)
         
     @staticmethod
     def get_config_value(config: ConfigParser, group: str, id: str, type: type) -> any:
@@ -190,7 +188,6 @@ class PrintDetect(ad.ADBase):
                 max_count = count
                 if count > 0:
                     annotated = self.draw_annotations(bgr.copy(), detections)
-                    self.detected_annotated_image = annotated
                     annotated_name = f"annotated_{i}.jpg"
                     if self.upload_media(annotated, annotated_name):
                         self.detected_snapshot_image = annotated_name
@@ -209,28 +206,6 @@ class PrintDetect(ad.ADBase):
         The print will be auto-cancelled after the timeout unless overridden.
         """
         self.alert_active = True
-
-        # Persistent notification — base64-embed the image so no auth issues
-        if self.detected_annotated_image is not None:
-            success, buf = cv2.imencode(".jpg", self.detected_annotated_image,
-                                        [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-            if success:
-                b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-                img_tag = f"<img src=\"data:image/jpeg;base64,{b64}\" style=\"width:100%;max-width:600px;\">"
-            else:
-                img_tag = ""
-        else:
-            img_tag = ""
-        msg_html = (
-            "An issue with your 3D print has been detected.<br><br>"
-            f"{img_tag}"
-        )
-        self.adapi.call_service("persistent_notification/create",
-                                title="3D Print Issue Detected",
-                                message=msg_html,
-                                notification_id="print_detect_alert")
-
-        # Push notification — full URL for the Android tray
         full_image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
         self.adapi.call_service("notify/notify",
                                 message="An issue with your 3D print has been detected. "
@@ -253,15 +228,9 @@ class PrintDetect(ad.ADBase):
                                     "push": {
                                         "interruption-level": "critical"
                                     }})
+        self.adapi.log(f"Push notification sent with image={full_image_url}")
         self.cancel_handle = self.adapi.run_in(self.cancel_print_callback, self.print_termination_time)
 
-    def handle_persistent_notification_dismissed(self, event_name, data, kwargs):
-        notifications = data.get("notifications", [])
-        active = any(n.get("notification_id") == "print_detect_alert" for n in notifications)
-        if self.alert_active and not active:
-            self.alert_active = False
-            self.adapi.log("Persistent notification dismissed, detection re-enabled")
-        
     def notify_on_warmup(self):
         """
         Notify the user when the printer is almost warmed up
@@ -315,6 +284,7 @@ class PrintDetect(ad.ADBase):
         '''
         Called when the user taps Cancel Print — stops the print immediately.
         '''
+        self.adapi.log("Cancel Print action received — stopping print immediately")
         if self.cancel_handle is not None:
             self.adapi.cancel_timer(self.cancel_handle)
             self.cancel_handle = None
@@ -325,6 +295,7 @@ class PrintDetect(ad.ADBase):
         '''
         Timer callback — auto-cancels the print when the timeout expires.
         '''
+        self.adapi.log("Cancel timer expired — auto-cancelling print")
         self.cancel_handle = None
         self.stop_print_button.call_service("press")
         self.adapi.call_service("notify/notify", message="The 3D print has been cancelled.", title="3D Print Cancelled")
@@ -333,6 +304,7 @@ class PrintDetect(ad.ADBase):
         '''
         Called when the user taps Continue Print — cancels the auto-cancel timer.
         '''
+        self.adapi.log("Continue Print action received — cancelling timer, print will continue")
         if self.cancel_handle is not None:
             self.adapi.cancel_timer(self.cancel_handle)
             self.cancel_handle = None
