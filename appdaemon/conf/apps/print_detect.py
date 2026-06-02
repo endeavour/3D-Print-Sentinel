@@ -201,10 +201,12 @@ class PrintDetect(ad.ADBase):
         The user must explicitly choose Stop Print or Dismiss.
         """
         self.alert_active = True
-        self.adapi.call_service("notify/notify", message=f"An issue with your 3D print has been detected.", 
+        self.adapi.call_service("notify/notify", message="An issue with your 3D print has been detected.", 
                                 title="3D Print Issue Detected",
                                 data={
                                     "image": f"/media/local/{self.detected_snapshot_image}",
+                                    "tag": "print-detect-alert",
+                                    "clickAction": "homeassistant://",
                                     "actions": [
                                         {
                                             "action": "STOP_PRINT_JOB",
