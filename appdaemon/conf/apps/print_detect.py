@@ -16,7 +16,7 @@ class PrintDetect(ad.ADBase):
     '''
     
     def initialize(self):
-        self.cancel_handle = None # handle for the cancel function
+        self.alert_active = False
         self.adapi = self.get_ad_api() # get the AppDaemon API
         
         # paths to the model files
@@ -135,6 +135,31 @@ class PrintDetect(ad.ADBase):
         cv2_img = cv2.imdecode(arr, -1)
         return cv2_img
     
+    def draw_annotations(self, image, detections):
+        h, w = image.shape[:2]
+        for d in detections:
+            x1 = int(d.box.left() * w)
+            y1 = int(d.box.top() * h)
+            x2 = int(d.box.right() * w)
+            y2 = int(d.box.bottom() * h)
+            label = f"{d.name} {d.confidence:.2f}"
+            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(image, label, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        return image
+
+    def upload_media(self, image_bgr, filename):
+        success, buf = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not success:
+            self.adapi.log(f"Failed to encode {filename}")
+            return False
+        url = f"{self.hass_hostname}/api/media_source/local_source/upload"
+        headers = {"Authorization": f"Bearer {self.hass_token}"}
+        resp = requests.post(url, headers=headers, files={"media": (filename, buf.tobytes(), "image/jpeg")})
+        if resp.status_code not in (200, 201):
+            self.adapi.log(f"Failed to upload {filename}: HTTP {resp.status_code}")
+            return False
+        return True
+
     def perform_detection(self) -> int:
         """
         Take snapshots from all cameras and run the detection model on each image.
@@ -158,15 +183,25 @@ class PrintDetect(ad.ADBase):
             self.adapi.log(f"Camera {i} ({entity_id}): detected {count} issues")
             if count > max_count:
                 max_count = count
-                self.detected_snapshot_image = image_name
+                if count > 0:
+                    annotated = self.draw_annotations(bgr.copy(), detections)
+                    annotated_name = f"annotated_{i}.jpg"
+                    if self.upload_media(annotated, annotated_name):
+                        self.detected_snapshot_image = annotated_name
+                    else:
+                        self.detected_snapshot_image = image_name
+                else:
+                    self.detected_snapshot_image = image_name
 
         self.adapi.log(f"Detection cycle complete: max {max_count} issues across {len(self.print_cameras)} camera(s)")
         return max_count
     
-    def send_detection_notification_and_countdown(self):
+    def send_detection_notification(self):
         """
-        Send a notification to the user that an issue has been detected and start the countdown to stop the print job.
+        Send a notification to the user that an issue has been detected.
+        The user must explicitly choose Stop Print or Dismiss.
         """
+        self.alert_active = True
         self.adapi.call_service("notify/notify", message=f"An issue with your 3D print has been detected. The print will be stopped in {self.print_termination_time} seconds if not dismissed.", 
                                 title="3D Print Issue Detected",
                                 data={
@@ -184,7 +219,6 @@ class PrintDetect(ad.ADBase):
                                     "push": {
                                         "interruption-level": "critical"
                                     }})
-        self.cancel_handle = self.adapi.run_in(self.cancel_print_callback, self.print_termination_time)
         
     def notify_on_warmup(self):
         """
