@@ -6,6 +6,7 @@ import requests
 import yaml
 import os
 import numpy as np
+import base64
 
 class PrintDetect(ad.ADBase):
     '''
@@ -32,6 +33,7 @@ class PrintDetect(ad.ADBase):
         self.printer_status = self.adapi.get_entity(self.printer_status_entity) # get the printer status
         self.print_cameras = [self.adapi.get_entity(e) for e in self.printer_camera_entities] # get all cameras
         self.detected_snapshot_image = "snapshot_0.jpg" # track which camera image triggered detection
+        self.detected_annotated_image = None # annotated BGR image for notification
         self.stop_print_button = self.adapi.get_entity(self.printer_stop_button_entity) # get the stop print button
         self.extruder_temp_sensor = self.adapi.get_entity(self.extruder_temp_sensor_entity) # get the extruder temperature sensor
         self.extruder_target_temp_sensor = self.adapi.get_entity(self.extruder_target_temp_sensor_entity) # get the extruder target temperature sensor
@@ -186,6 +188,7 @@ class PrintDetect(ad.ADBase):
                 max_count = count
                 if count > 0:
                     annotated = self.draw_annotations(bgr.copy(), detections)
+                    self.detected_annotated_image = annotated
                     annotated_name = f"annotated_{i}.jpg"
                     if self.upload_media(annotated, annotated_name):
                         self.detected_snapshot_image = annotated_name
@@ -204,19 +207,27 @@ class PrintDetect(ad.ADBase):
         """
         self.alert_active = True
 
-        # Persistent notification — relative URL so the frontend resolves it with auth
+        # Persistent notification — base64-embed the image so no auth issues
+        if self.detected_annotated_image is not None:
+            success, buf = cv2.imencode(".jpg", self.detected_annotated_image,
+                                        [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            if success:
+                b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+                img_tag = f"<img src=\"data:image/jpeg;base64,{b64}\" style=\"width:100%;max-width:600px;\">"
+            else:
+                img_tag = ""
+        else:
+            img_tag = ""
         msg_html = (
-            "An issue with your 3D print has been detected.<br>"
-            "<br>"
-            f"<img src=\"/media/local/{self.detected_snapshot_image}\" "
-            f"style=\"width:100%;max-width:600px;\">"
+            "An issue with your 3D print has been detected.<br><br>"
+            f"{img_tag}"
         )
         self.adapi.call_service("persistent_notification/create",
                                 title="3D Print Issue Detected",
                                 message=msg_html,
                                 notification_id="print_detect_alert")
 
-        # Push notification — full URL for the Companion App
+        # Push notification — full URL for the Android tray
         full_image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
         self.adapi.call_service("notify/notify",
                                 message="An issue with your 3D print has been detected.",
