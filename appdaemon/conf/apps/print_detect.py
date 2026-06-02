@@ -31,7 +31,8 @@ class PrintDetect(ad.ADBase):
         self.load_secret_values()
         
         self.printer_status = self.adapi.get_entity(self.printer_status_entity) # get the printer status
-        self.print_camera = self.adapi.get_entity(self.printer_camera_entity) # get the camera
+        self.print_cameras = [self.adapi.get_entity(e) for e in self.printer_camera_entities] # get all cameras
+        self.detected_snapshot_image = "snapshot_0.jpg" # track which camera image triggered detection
         self.stop_print_button = self.adapi.get_entity(self.printer_stop_button_entity) # get the stop print button
         self.extruder_temp_sensor = self.adapi.get_entity(self.extruder_temp_sensor_entity) # get the extruder temperature sensor
         self.extruder_target_temp_sensor = self.adapi.get_entity(self.extruder_target_temp_sensor_entity) # get the extruder target temperature sensor
@@ -87,8 +88,14 @@ class PrintDetect(ad.ADBase):
                                                                 id='BinaryIsPrintingSensor', type=str)
         self.printer_printing_state: str = PrintDetect.get_config_value(config=config, group='printer.entities', 
                                                                 id='PrintingOnState', type=str)
-        self.printer_camera_entity: str = PrintDetect.get_config_value(config=config, group='printer.entities', 
-                                                                id='PrinterCamera', type=str)
+        if config.has_option('printer.entities', 'PrinterCameras') or config.has_option('DEFAULT', 'PrinterCameras'):
+            cameras_str: str = PrintDetect.get_config_value(config=config, group='printer.entities',
+                                                            id='PrinterCameras', type=str)
+            self.printer_camera_entities = [c.strip() for c in cameras_str.split(',')]
+        else:
+            single: str = PrintDetect.get_config_value(config=config, group='printer.entities',
+                                                        id='PrinterCamera', type=str)
+            self.printer_camera_entities = [single]
         self.printer_stop_button_entity: str = PrintDetect.get_config_value(config=config, group='printer.entities', 
                                                                 id='PrinterStopButton', type=str)
         self.detection_interval: int = PrintDetect.get_config_value(config=config, group='program.timings', 
@@ -106,14 +113,17 @@ class PrintDetect(ad.ADBase):
         self.notification_on_warp_up: bool = True if PrintDetect.get_config_value(config=config, group='notifications.config',
                                                                 id='NotifyOnWarmup', type=str) == 'True' else False
         
-    def get_camera_snapshot(self):
+    def get_camera_snapshot(self, image_path="snapshot_0.jpg"):
         """
         Get the camera snapshot and decode it into an image.
+
+        Args:
+            image_path: The image filename (e.g. snapshot.jpg) to fetch from HA media.
 
         Returns:
             The decoded image.
         """
-        url = f"{self.hass_hostname}/media/local/snapshot.jpg"
+        url = f"{self.hass_hostname}/media/local/{image_path}"
         headers = {
             'Authorization': f'Bearer {self.hass_token}'
         }
@@ -127,20 +137,29 @@ class PrintDetect(ad.ADBase):
     
     def perform_detection(self) -> int:
         """
-        Take a snapshot of the print job and run the detection model on the image.
+        Take snapshots from all cameras and run the detection model on each image.
+        The camera that detects the most issues determines which snapshot is used
+        in the notification.
 
         Returns:
-            int: The number of issues detected. 0 if a snapshot could not be taken.
+            int: The number of issues detected. 0 if no issues or snapshots failed.
         """
-        self.print_camera.call_service("snapshot", filename="/media/snapshot.jpg")
-        custom_image_bgr = self.get_camera_snapshot()
-        if custom_image_bgr is None:
-            self.adapi.log("Failed to get camera snapshot, skipping detection for this cycle.")
-            return 0
-        detections = detect(self.net_main_1, custom_image_bgr, thresh=self.detection_threshold, nms=self.detection_nms)
-        detection_count = len(detections)
-        self.adapi.log(f"Detected {detection_count} issues")
-        return detection_count
+        max_count = 0
+        for i, cam in enumerate(self.print_cameras):
+            image_name = f"snapshot_{i}.jpg"
+            cam.call_service("snapshot", filename=f"/media/{image_name}")
+            bgr = self.get_camera_snapshot(image_name)
+            if bgr is None:
+                self.adapi.log(f"Failed to get snapshot from camera {i}, skipping.")
+                continue
+            detections = detect(self.net_main_1, bgr, thresh=self.detection_threshold, nms=self.detection_nms)
+            count = len(detections)
+            if count > max_count:
+                max_count = count
+                self.detected_snapshot_image = image_name
+
+        self.adapi.log(f"Detected {max_count} issues")
+        return max_count
     
     def send_detection_notification_and_countdown(self):
         """
@@ -149,7 +168,7 @@ class PrintDetect(ad.ADBase):
         self.adapi.call_service("notify/notify", message=f"An issue with your 3D print has been detected. The print will be stopped in {self.print_termination_time} seconds if not dismissed.", 
                                 title="3D Print Issue Detected",
                                 data={
-                                    "image": "/media/local/snapshot.jpg",
+                                    "image": f"/media/local/{self.detected_snapshot_image}",
                                     "actions": [
                                         {
                                             "action": "STOP_PRINT_JOB",
@@ -175,7 +194,7 @@ class PrintDetect(ad.ADBase):
                                     message="The 3D printer has almost warmed up. Remove any excess filament before your print starts.", 
                                     title="3D Printer Warming Up",
                                     data={
-                                        "image": "/media/local/snapshot.jpg"
+                                        "image": "/media/local/snapshot_0.jpg"
                                     })
         if float(self.extruder_temp_sensor.state) > (0.96 * float(self.extruder_target_temp_sensor.state)):
             self.warmup_complete = False
