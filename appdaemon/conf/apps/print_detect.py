@@ -147,18 +147,20 @@ class PrintDetect(ad.ADBase):
         max_count = 0
         for i, cam in enumerate(self.print_cameras):
             image_name = f"snapshot_{i}.jpg"
+            entity_id = self.printer_camera_entities[i]
             cam.call_service("snapshot", filename=f"/media/{image_name}")
             bgr = self.get_camera_snapshot(image_name)
             if bgr is None:
-                self.adapi.log(f"Failed to get snapshot from camera {i}, skipping.")
+                self.adapi.log(f"Camera {i} ({entity_id}): snapshot failed, skipping.")
                 continue
             detections = detect(self.net_main_1, bgr, thresh=self.detection_threshold, nms=self.detection_nms)
             count = len(detections)
+            self.adapi.log(f"Camera {i} ({entity_id}): detected {count} issues")
             if count > max_count:
                 max_count = count
                 self.detected_snapshot_image = image_name
 
-        self.adapi.log(f"Detected {max_count} issues")
+        self.adapi.log(f"Detection cycle complete: max {max_count} issues across {len(self.print_cameras)} camera(s)")
         return max_count
     
     def send_detection_notification_and_countdown(self):
