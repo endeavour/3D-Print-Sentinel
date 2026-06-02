@@ -12,10 +12,12 @@ class PrintDetect(ad.ADBase):
     '''
     This class is used to detect issues with a 3D print job using the machine learning model. 
     It takes a snapshot of the print job every x seconds (5 by default) and runs the detection model on the image.
-    If an issue is detected, a notification with an annotated image is sent to the user with the option to stop the print job or dismiss.
+    If an issue is detected, notifications are sent and the print is auto-cancelled after a timeout
+    unless the user overrides with Continue Print.
     '''
     
     def initialize(self):
+        self.cancel_handle = None
         self.alert_active = False
         self.adapi = self.get_ad_api() # get the AppDaemon API
         
@@ -204,6 +206,7 @@ class PrintDetect(ad.ADBase):
         """
         Create both a persistent notification (with annotated image)
         and a push notification (for the Android tray with action buttons).
+        The print will be auto-cancelled after the timeout unless overridden.
         """
         self.alert_active = True
 
@@ -230,7 +233,8 @@ class PrintDetect(ad.ADBase):
         # Push notification — full URL for the Android tray
         full_image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
         self.adapi.call_service("notify/notify",
-                                message="An issue with your 3D print has been detected.",
+                                message="An issue with your 3D print has been detected. "
+                                        f"The print will be cancelled in {self.print_termination_time} seconds if not overridden.",
                                 title="3D Print Issue Detected",
                                 data={
                                     "image": full_image_url,
@@ -238,17 +242,18 @@ class PrintDetect(ad.ADBase):
                                     "url": "/lovelace/0",
                                     "actions": [
                                         {
-                                            "action": "STOP_PRINT_JOB",
-                                            "title": "Stop Print"
+                                            "action": "CONTINUE_PRINT",
+                                            "title": "Continue Print"
                                         },
                                         {
-                                            "action": "DISMISS_NOTIFICATION",
-                                            "title": "Dismiss"
+                                            "action": "CANCEL_PRINT",
+                                            "title": "Cancel Print"
                                         }
                                     ],
                                     "push": {
                                         "interruption-level": "critical"
                                     }})
+        self.cancel_handle = self.adapi.run_in(self.cancel_print_callback, self.print_termination_time)
 
     def handle_persistent_notification_dismissed(self, event_name, data, kwargs):
         notifications = data.get("notifications", [])
@@ -285,7 +290,7 @@ class PrintDetect(ad.ADBase):
         It will send a notification if an issue is detected.
         '''
         # check if the printer is on and a notification has not already been sent
-        if self.printer_status.is_state(self.printer_printing_state) and not self.alert_active:
+        if self.printer_status.is_state(self.printer_printing_state) and self.cancel_handle == None:
             # call the extra notifications router to check if any extra notifications are needed
             self.extra_notifications_router()
             # if the printer is on, take a snapshot and run the detection model
@@ -301,24 +306,35 @@ class PrintDetect(ad.ADBase):
         It will run the appropriate function based on the action received.
         '''
         self.adapi.log(f"Received action: {data}")
-        if data["action"] == "STOP_PRINT_JOB":
-            self.stop_print_job()
-        elif data["action"] == "DISMISS_NOTIFICATION":
-            self.dismiss_print_cancel()
+        if data["action"] == "CANCEL_PRINT":
+            self.cancel_print()
+        elif data["action"] == "CONTINUE_PRINT":
+            self.continue_print()
 
-    def stop_print_job(self):
+    def cancel_print(self):
         '''
-        This function is called to stop the print job. 
-        It will send a notification to the user and call the stop print button.
+        Called when the user taps Cancel Print — stops the print immediately.
         '''
-        self.dismiss_print_cancel()
+        if self.cancel_handle is not None:
+            self.adapi.cancel_timer(self.cancel_handle)
+            self.cancel_handle = None
         self.stop_print_button.call_service("press")
-        self.adapi.call_service("notify/notify", message="The 3D print has been stopped due to an issue.", title="3D Print Stopped")
-        
-    def dismiss_print_cancel(self):
+        self.adapi.call_service("notify/notify", message="The 3D print has been cancelled.", title="3D Print Cancelled")
+
+    def cancel_print_callback(self, cb_args):
         '''
-        This function is called to dismiss the print issue notification.
-        It clears the alert flag and sends a confirmation notification.
+        Timer callback — auto-cancels the print when the timeout expires.
         '''
+        self.cancel_handle = None
+        self.stop_print_button.call_service("press")
+        self.adapi.call_service("notify/notify", message="The 3D print has been cancelled.", title="3D Print Cancelled")
+
+    def continue_print(self):
+        '''
+        Called when the user taps Continue Print — cancels the auto-cancel timer.
+        '''
+        if self.cancel_handle is not None:
+            self.adapi.cancel_timer(self.cancel_handle)
+            self.cancel_handle = None
+        self.adapi.call_service("notify/notify", message="The 3D print will continue.", title="3D Print Continuing")
         self.alert_active = False
-        self.adapi.call_service("notify/notify", message="The 3D print issue has been dismissed.", title="3D Print Issue Dismissed")
