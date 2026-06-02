@@ -42,6 +42,7 @@ class PrintDetect(ad.ADBase):
         
         self.adapi.run_every(self.run_every_c, "now", self.detection_interval) # run the detection every x seconds
         self.adapi.listen_event(self.handle_action, "mobile_app_notification_action") # listen for mobile app notification actions (e.g. stop print or dismiss)
+        self.adapi.listen_event(self.handle_persistent_notification_dismissed, "persistent_notifications_updated") # listen for persistent notification dismissal
         
     @staticmethod
     def get_config_value(config: ConfigParser, group: str, id: str, type: type) -> any:
@@ -198,30 +199,30 @@ class PrintDetect(ad.ADBase):
     
     def send_detection_notification(self):
         """
-        Send a notification to the user that an issue has been detected.
-        The user must explicitly choose Stop Print or Dismiss.
+        Create a persistent notification in HA with the annotated image.
+        The user can view it in the HA frontend or Companion App.
+        Dismissing it from the UI re-enables detection.
         """
         self.alert_active = True
         image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
-        self.adapi.call_service("notify/notify", message="An issue with your 3D print has been detected.", 
+        message = (
+            f"An issue with your 3D print has been detected.<br>"
+            f"<br>"
+            f"<img src=\"{image_url}\" style=\"width:100%;max-width:600px;\">"
+            f"<br>"
+            f"To stop the print, use the Stop Print button in Home Assistant."
+        )
+        self.adapi.call_service("persistent_notification/create",
                                 title="3D Print Issue Detected",
-                                data={
-                                    "image": image_url,
-                                    "tag": "print-detect-alert",
-                                    "url": "/lovelace/0",
-                                    "actions": [
-                                        {
-                                            "action": "STOP_PRINT_JOB",
-                                            "title": "Stop Print"
-                                        },
-                                        {
-                                            "action": "DISMISS_NOTIFICATION",
-                                            "title": "Dismiss"
-                                        }
-                                    ],
-                                    "push": {
-                                        "interruption-level": "critical"
-                                    }})
+                                message=message,
+                                notification_id="print_detect_alert")
+
+    def handle_persistent_notification_dismissed(self, event_name, data, kwargs):
+        notifications = data.get("notifications", [])
+        active = any(n.get("notification_id") == "print_detect_alert" for n in notifications)
+        if self.alert_active and not active:
+            self.alert_active = False
+            self.adapi.log("Persistent notification dismissed, detection re-enabled")
         
     def notify_on_warmup(self):
         """
