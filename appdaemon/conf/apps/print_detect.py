@@ -146,8 +146,8 @@ class PrintDetect(ad.ADBase):
             x2 = int(xc + w / 2)
             y2 = int(yc + h / 2)
             label = f"{name} {confidence:.2f}"
-            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(image, label, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            cv2.putText(image, label, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
         return image
 
     def upload_media(self, image_bgr, filename):
