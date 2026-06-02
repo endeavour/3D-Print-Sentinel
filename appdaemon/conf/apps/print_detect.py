@@ -202,12 +202,13 @@ class PrintDetect(ad.ADBase):
         The user must explicitly choose Stop Print or Dismiss.
         """
         self.alert_active = True
+        image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
         self.adapi.call_service("notify/notify", message="An issue with your 3D print has been detected.", 
                                 title="3D Print Issue Detected",
                                 data={
-                                    "image": f"/media/local/{self.detected_snapshot_image}",
+                                    "image": image_url,
                                     "tag": "print-detect-alert",
-                                    "url": "/",
+                                    "url": "/lovelace/0",
                                     "actions": [
                                         {
                                             "action": "STOP_PRINT_JOB",
