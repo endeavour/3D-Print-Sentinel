@@ -233,6 +233,7 @@ class PrintDetect(ad.ADBase):
                                 title="3D Print Issue Detected",
                                 data={
                                     "image": full_image_url,
+                                    "channel": "printer_alarm",
                                     "tag": "print-detect-alert",
                                     "url": "/lovelace/0",
                                     "actions": [
