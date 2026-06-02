@@ -157,6 +157,7 @@ class PrintDetect(ad.ADBase):
         if resp.status_code not in (200, 201):
             self.adapi.log(f"Failed to upload {filename}: HTTP {resp.status_code}")
             return False
+        self.adapi.log(f"Uploaded {filename} to HA media")
         return True
 
     def perform_detection(self) -> int:
@@ -206,7 +207,7 @@ class PrintDetect(ad.ADBase):
                                 data={
                                     "image": f"/media/local/{self.detected_snapshot_image}",
                                     "tag": "print-detect-alert",
-                                    "clickAction": "homeassistant://",
+                                    "url": "/",
                                     "actions": [
                                         {
                                             "action": "STOP_PRINT_JOB",
