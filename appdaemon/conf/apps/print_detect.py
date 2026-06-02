@@ -199,23 +199,45 @@ class PrintDetect(ad.ADBase):
     
     def send_detection_notification(self):
         """
-        Create a persistent notification in HA with the annotated image.
-        The user can view it in the HA frontend or Companion App.
-        Dismissing it from the UI re-enables detection.
+        Create both a persistent notification (with annotated image)
+        and a push notification (for the Android tray with action buttons).
         """
         self.alert_active = True
-        image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
-        message = (
-            f"An issue with your 3D print has been detected.<br>"
-            f"<br>"
-            f"<img src=\"{image_url}\" style=\"width:100%;max-width:600px;\">"
-            f"<br>"
-            f"To stop the print, use the Stop Print button in Home Assistant."
+
+        # Persistent notification — relative URL so the frontend resolves it with auth
+        msg_html = (
+            "An issue with your 3D print has been detected.<br>"
+            "<br>"
+            f"<img src=\"/media/local/{self.detected_snapshot_image}\" "
+            f"style=\"width:100%;max-width:600px;\">"
         )
         self.adapi.call_service("persistent_notification/create",
                                 title="3D Print Issue Detected",
-                                message=message,
+                                message=msg_html,
                                 notification_id="print_detect_alert")
+
+        # Push notification — full URL for the Companion App
+        full_image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
+        self.adapi.call_service("notify/notify",
+                                message="An issue with your 3D print has been detected.",
+                                title="3D Print Issue Detected",
+                                data={
+                                    "image": full_image_url,
+                                    "tag": "print-detect-alert",
+                                    "url": "/lovelace/0",
+                                    "actions": [
+                                        {
+                                            "action": "STOP_PRINT_JOB",
+                                            "title": "Stop Print"
+                                        },
+                                        {
+                                            "action": "DISMISS_NOTIFICATION",
+                                            "title": "Dismiss"
+                                        }
+                                    ],
+                                    "push": {
+                                        "interruption-level": "critical"
+                                    }})
 
     def handle_persistent_notification_dismissed(self, event_name, data, kwargs):
         notifications = data.get("notifications", [])
