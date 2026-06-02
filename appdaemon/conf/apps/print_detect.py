@@ -220,7 +220,8 @@ class PrintDetect(ad.ADBase):
             # if the printer is on, take a snapshot and run the detection model
             detection_count = self.perform_detection()
             # if an issue is detected, send a notification
-            if detection_count > 1:
+            if detection_count > 0:
+                self.adapi.log(f"Detection threshold met ({detection_count} issues), sending notification and starting countdown")
                 self.send_detection_notification_and_countdown()
 
     def handle_action(self, event_name, data, kwargs):
