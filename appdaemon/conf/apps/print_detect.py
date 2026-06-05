@@ -27,6 +27,7 @@ class PrintDetect(ad.ADBase):
         self.model_weights = "/conf/model/model-weights-5a6b1be1fa.onnx"
 
         self.warmup_complete = False
+        self.images_dir = "/conf/images"
 
         self.load_config()
         self.load_secret_values()
@@ -43,6 +44,9 @@ class PrintDetect(ad.ADBase):
 
         if self.notification_on_warp_up and (self.extruder_temp_sensor is None or self.extruder_target_temp_sensor is None):
             raise RuntimeError("Invalid Config File. ExtruderTempSensor and ExtruderTargetTempSensor must be defined if NotifyOnWarmup is True.")
+
+        if self.save_annotated_images:
+            os.makedirs(self.images_dir, exist_ok=True)
 
         self.adapi.run_every(self.run_every_c, "now", self.detection_interval)
         self.adapi.listen_event(self.handle_action, "mobile_app_notification_action")
@@ -119,6 +123,8 @@ class PrintDetect(ad.ADBase):
                                                                 id='ExtruderTargetTempSensor', type=str)
         self.notification_on_warp_up: bool = True if PrintDetect.get_config_value(config=config, group='notifications.config',
                                                                 id='NotifyOnWarmup', type=str) == 'True' else False
+        self.save_annotated_images: bool = True if PrintDetect.get_config_value(config=config, group='notifications.config',
+                                                                id='SaveAnnotatedImages', type=str) == 'True' else False
         
     def get_camera_snapshot(self, image_path="snapshot_0.jpg"):
         """
@@ -201,6 +207,9 @@ class PrintDetect(ad.ADBase):
                 if count > 0:
                     annotated = self.draw_annotations(bgr.copy(), detections)
                     self.detected_annotated_image = annotated
+                    if self.save_annotated_images:
+                        cv2.imwrite(os.path.join(self.images_dir, f"annotated_{i}.jpg"), annotated)
+                        self.adapi.log(f"Saved annotated image to {self.images_dir}/annotated_{i}.jpg")
                     annotated_name = f"annotated_{i}.jpg"
                     if self.upload_media(annotated, annotated_name):
                         self.detected_snapshot_image = annotated_name

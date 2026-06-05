@@ -4,3 +4,5 @@ services:
     build: ./appdaemon
     env_file: .env
     restart: unless-stopped
+    volumes:
+      - ./images:/conf/images
