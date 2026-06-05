@@ -10,42 +10,42 @@ import base64
 
 class PrintDetect(ad.ADBase):
     '''
-    This class is used to detect issues with a 3D print job using the machine learning model. 
-    It takes a snapshot of the print job every x seconds (5 by default) and runs the detection model on the image.
-    If an issue is detected, notifications are sent and the print is auto-cancelled after a timeout
-    unless the user overrides with Continue Print.
+    Detects issues with a 3D print job using a machine learning model.
+    Takes snapshots every N seconds and runs detection. On anomaly detection,
+    sends a notification, auto-pauses after PauseTime seconds, and auto-cancels
+    after a further TerminationTime seconds unless the user intervenes.
     '''
     
     def initialize(self):
         self.cancel_handle = None
+        self.pause_handle = None
         self.alert_active = False
-        self.adapi = self.get_ad_api() # get the AppDaemon API
-        
-        # paths to the model files
+        self.adapi = self.get_ad_api()
+
         self.model_cfg = "/conf/model/model.cfg"
         self.model_meta = "/conf/model/model.meta"
         self.model_weights = "/conf/model/model-weights-5a6b1be1fa.onnx"
-        
-        self.warmup_complete = False # flag to check if the printer has warmed up
-        
-        # load all configuration file variables
+
+        self.warmup_complete = False
+
         self.load_config()
         self.load_secret_values()
-        
-        self.printer_status = self.adapi.get_entity(self.printer_status_entity) # get the printer status
-        self.print_cameras = [self.adapi.get_entity(e) for e in self.printer_camera_entities] # get all cameras
-        self.detected_snapshot_image = "snapshot_0.jpg" # track which camera image triggered detection
-        self.detected_annotated_image = None # annotated BGR image for persistent notification
-        self.stop_print_button = self.adapi.get_entity(self.printer_stop_button_entity) # get the stop print button
-        self.extruder_temp_sensor = self.adapi.get_entity(self.extruder_temp_sensor_entity) # get the extruder temperature sensor
-        self.extruder_target_temp_sensor = self.adapi.get_entity(self.extruder_target_temp_sensor_entity) # get the extruder target temperature sensor
-        self.net_main_1 = load_net(self.model_cfg, self.model_meta, self.model_weights) # load the ml model
-        
+
+        self.printer_status = self.adapi.get_entity(self.printer_status_entity)
+        self.print_cameras = [self.adapi.get_entity(e) for e in self.printer_camera_entities]
+        self.detected_snapshot_image = "snapshot_0.jpg"
+        self.detected_annotated_image = None
+        self.stop_print_button = self.adapi.get_entity(self.printer_stop_button_entity)
+        self.pause_print_button = self.adapi.get_entity(self.printer_pause_button_entity)
+        self.extruder_temp_sensor = self.adapi.get_entity(self.extruder_temp_sensor_entity)
+        self.extruder_target_temp_sensor = self.adapi.get_entity(self.extruder_target_temp_sensor_entity)
+        self.net_main_1 = load_net(self.model_cfg, self.model_meta, self.model_weights)
+
         if self.notification_on_warp_up and (self.extruder_temp_sensor is None or self.extruder_target_temp_sensor is None):
             raise RuntimeError("Invalid Config File. ExtruderTempSensor and ExtruderTargetTempSensor must be defined if NotifyOnWarmup is True.")
-        
-        self.adapi.run_every(self.run_every_c, "now", self.detection_interval) # run the detection every x seconds
-        self.adapi.listen_event(self.handle_action, "mobile_app_notification_action") # listen for mobile app notification actions (e.g. stop print or continue)
+
+        self.adapi.run_every(self.run_every_c, "now", self.detection_interval)
+        self.adapi.listen_event(self.handle_action, "mobile_app_notification_action")
         
     @staticmethod
     def get_config_value(config: ConfigParser, group: str, id: str, type: type) -> any:
@@ -64,7 +64,7 @@ class PrintDetect(ad.ADBase):
         Returns:
             any: The value.
         """
-        value = config[group][id] or config['DEFAULT'][id]
+        value = config[group][id]
         try:
             value = type(value)
             return value
@@ -91,7 +91,7 @@ class PrintDetect(ad.ADBase):
                                                                 id='BinaryIsPrintingSensor', type=str)
         self.printer_printing_state: str = PrintDetect.get_config_value(config=config, group='printer.entities', 
                                                                 id='PrintingOnState', type=str)
-        if config.has_option('printer.entities', 'PrinterCameras') or config.has_option('DEFAULT', 'PrinterCameras'):
+        if config.has_option('printer.entities', 'PrinterCameras'):
             cameras_str: str = PrintDetect.get_config_value(config=config, group='printer.entities',
                                                             id='PrinterCameras', type=str)
             self.printer_camera_entities = [c.strip() for c in cameras_str.split(',')]
@@ -101,8 +101,12 @@ class PrintDetect(ad.ADBase):
             self.printer_camera_entities = [single]
         self.printer_stop_button_entity: str = PrintDetect.get_config_value(config=config, group='printer.entities', 
                                                                 id='PrinterStopButton', type=str)
+        self.printer_pause_button_entity: str = PrintDetect.get_config_value(config=config, group='printer.entities', 
+                                                                id='PrinterPauseButton', type=str)
         self.detection_interval: int = PrintDetect.get_config_value(config=config, group='program.timings', 
                                                                 id='RunModelInterval', type=int)
+        self.pause_time: int = PrintDetect.get_config_value(config=config, group='program.timings', 
+                                                                id='PauseTime', type=int)
         self.print_termination_time: int = PrintDetect.get_config_value(config=config, group='program.timings', 
                                                                 id='TerminationTime', type=int)
         self.detection_threshold: float = PrintDetect.get_config_value(config=config, group='model.detection', 
@@ -174,6 +178,7 @@ class PrintDetect(ad.ADBase):
             int: The number of issues detected. 0 if no issues or snapshots failed.
         """
         max_count = 0
+        self.max_confidence = 0.0
         for i, cam in enumerate(self.print_cameras):
             image_name = f"snapshot_{i}.jpg"
             entity_id = self.printer_camera_entities[i]
@@ -184,9 +189,15 @@ class PrintDetect(ad.ADBase):
                 continue
             detections = detect(self.net_main_1, bgr, thresh=self.detection_threshold, nms=self.detection_nms)
             count = len(detections)
-            self.adapi.log(f"Camera {i} ({entity_id}): detected {count} issues")
+            if count > 0:
+                confidences = [d[1] for d in detections]
+                cam_max_conf = max(confidences)
+                self.adapi.log(f"Camera {i} ({entity_id}): detected {count} issues, max confidence {cam_max_conf:.2%}")
+            else:
+                self.adapi.log(f"Camera {i} ({entity_id}): detected {count} issues")
             if count > max_count:
                 max_count = count
+                self.max_confidence = max(confidences) if count > 0 else 0.0
                 if count > 0:
                     annotated = self.draw_annotations(bgr.copy(), detections)
                     self.detected_annotated_image = annotated
@@ -198,18 +209,12 @@ class PrintDetect(ad.ADBase):
                 else:
                     self.detected_snapshot_image = image_name
 
-        self.adapi.log(f"Detection cycle complete: max {max_count} issues across {len(self.print_cameras)} camera(s)")
+        self.adapi.log(f"Detection cycle complete: max {max_count} issues, max confidence {self.max_confidence:.2%} across {len(self.print_cameras)} camera(s)")
         return max_count
     
     def send_detection_notification(self):
-        """
-        Create both a persistent notification (with annotated image)
-        and a push notification (for the Android tray with action buttons).
-        The print will be auto-cancelled after the timeout unless overridden.
-        """
         self.alert_active = True
 
-        # Persistent notification with embedded image
         if self.detected_annotated_image is not None:
             success, buf = cv2.imencode(".jpg", self.detected_annotated_image,
                                         [int(cv2.IMWRITE_JPEG_QUALITY), 90])
@@ -220,16 +225,17 @@ class PrintDetect(ad.ADBase):
                 img_tag = ""
         else:
             img_tag = ""
+        conf_pct = f"{self.max_confidence:.1%}"
         self.adapi.call_service("persistent_notification/create",
                                 title="3D Print Issue Detected",
-                                message=f"An issue with your 3D print has been detected.<br><br>{img_tag}",
+                                message=f"An issue with your 3D print has been detected (confidence: {conf_pct}).<br><br>{img_tag}",
                                 notification_id="print_detect_alert")
 
-        # Push notification with action buttons
+        total_cancel_time = self.pause_time + self.print_termination_time
         full_image_url = f"{self.hass_hostname}/media/local/{self.detected_snapshot_image}"
         self.adapi.call_service("notify/notify",
-                                message="An issue with your 3D print has been detected. "
-                                        f"The print will be cancelled in {self.print_termination_time} seconds if not overridden.",
+                                message=f"An issue with your 3D print has been detected (confidence: {conf_pct}). "
+                                        f"The print will be paused in {self.pause_time}s and cancelled in {total_cancel_time}s if not overridden.",
                                 title="3D Print Issue Detected",
                                 data={
                                     "image": full_image_url,
@@ -242,6 +248,10 @@ class PrintDetect(ad.ADBase):
                                             "title": "Continue Print"
                                         },
                                         {
+                                            "action": "PAUSE_PRINT",
+                                            "title": "Pause Print"
+                                        },
+                                        {
                                             "action": "CANCEL_PRINT",
                                             "title": "Cancel Print"
                                         }
@@ -250,7 +260,8 @@ class PrintDetect(ad.ADBase):
                                         "interruption-level": "critical"
                                     }})
         self.adapi.log(f"Push notification sent with image={full_image_url}")
-        self.cancel_handle = self.adapi.run_in(self.cancel_print_callback, self.print_termination_time)
+        self.pause_handle = self.adapi.run_in(self.pause_print_callback, self.pause_time)
+        self.cancel_handle = self.adapi.run_in(self.cancel_print_callback, total_cancel_time)
 
     def notify_on_warmup(self):
         """
@@ -275,59 +286,65 @@ class PrintDetect(ad.ADBase):
             self.notify_on_warmup()
         
     def run_every_c(self, cb_args):
-        '''
-        This function is called every x seconds to take a snapshot of the print job and run the detection model.
-        It will send a notification if an issue is detected.
-        '''
-        # check if the printer is on and a notification has not already been sent
-        if self.printer_status.is_state(self.printer_printing_state) and self.cancel_handle == None:
-            # call the extra notifications router to check if any extra notifications are needed
+        if self.printer_status.is_state(self.printer_printing_state) and not self.alert_active:
             self.extra_notifications_router()
-            # if the printer is on, take a snapshot and run the detection model
             detection_count = self.perform_detection()
-            # if an issue is detected, send a notification
             if detection_count > 0:
                 self.adapi.log(f"Detection threshold met ({detection_count} issues), sending notification")
                 self.send_detection_notification()
 
     def handle_action(self, event_name, data, kwargs):
-        '''
-        This is a routing function called when a mobile app notification action is received.
-        It will run the appropriate function based on the action received.
-        '''
         self.adapi.log(f"Received action: {data}")
         if data["action"] == "CANCEL_PRINT":
             self.cancel_print()
+        elif data["action"] == "PAUSE_PRINT":
+            self.pause_print()
         elif data["action"] == "CONTINUE_PRINT":
             self.continue_print()
 
-    def cancel_print(self):
-        '''
-        Called when the user taps Cancel Print — stops the print immediately.
-        '''
-        self.adapi.log("Cancel Print action received — stopping print immediately")
+    def _cancel_timers(self):
+        if self.pause_handle is not None:
+            self.adapi.cancel_timer(self.pause_handle)
+            self.pause_handle = None
         if self.cancel_handle is not None:
             self.adapi.cancel_timer(self.cancel_handle)
             self.cancel_handle = None
+        self.alert_active = False
+
+    def cancel_print(self):
+        self.adapi.log("Cancel Print action received — stopping print immediately")
+        self._cancel_timers()
         self.stop_print_button.call_service("press")
         self.adapi.call_service("notify/notify", message="The 3D print has been cancelled.", title="3D Print Cancelled")
 
     def cancel_print_callback(self, cb_args):
-        '''
-        Timer callback — auto-cancels the print when the timeout expires.
-        '''
         self.adapi.log("Cancel timer expired — auto-cancelling print")
         self.cancel_handle = None
+        self.alert_active = False
         self.stop_print_button.call_service("press")
         self.adapi.call_service("notify/notify", message="The 3D print has been cancelled.", title="3D Print Cancelled")
 
+    def pause_print(self):
+        self.adapi.log("Pause Print action received — pausing print")
+        self._cancel_timers()
+        self.pause_print_button.call_service("press")
+        self.adapi.call_service("notify/notify", message="The 3D print has been paused.", title="3D Print Paused")
+
+    def pause_print_callback(self, cb_args):
+        self.adapi.log("Pause timer expired — auto-pausing print")
+        self.pause_handle = None
+        self.pause_print_button.call_service("press")
+        self.adapi.call_service("notify/notify", message="The 3D print has been paused. It will be cancelled "
+                                f"in {self.print_termination_time}s if not overridden.",
+                                title="3D Print Paused",
+                                data={
+                                    "actions": [
+                                        {"action": "CONTINUE_PRINT", "title": "Continue Print"},
+                                        {"action": "CANCEL_PRINT", "title": "Cancel Print"}
+                                    ]
+                                })
+
     def continue_print(self):
-        '''
-        Called when the user taps Continue Print — cancels the auto-cancel timer.
-        '''
-        self.adapi.log("Continue Print action received — cancelling timer, print will continue")
-        if self.cancel_handle is not None:
-            self.adapi.cancel_timer(self.cancel_handle)
-            self.cancel_handle = None
+        self.adapi.log("Continue Print action received — cancelling timers, print will continue")
+        self._cancel_timers()
         self.adapi.call_service("notify/notify", message="The 3D print will continue.", title="3D Print Continuing")
-        self.alert_active = False
