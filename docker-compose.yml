@@ -6,3 +6,4 @@ services:
     restart: unless-stopped
     volumes:
       - ./images:/conf/images
+      - ./appdaemon/conf/apps/config.ini:/conf/apps/config.ini
